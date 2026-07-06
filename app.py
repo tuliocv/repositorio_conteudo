@@ -29,25 +29,46 @@ def criar_slug_curso(nome_curso):
 PASTA_TMP = "/tmp/download_workspace"
 ARQUIVO_ZIP_FINAL = "/tmp/resultado_curso.zip"
 
+@st.cache_data(show_spinner=False)
+def carregar_dados_otimizados(arquivo):
+    colunas_obrigatorias = ['ANO', 'PERÍODO', 'CURSO', 'UC', 'CATÁLOGO', 'ORDEM AULA', 'ORDEM ATIVIDADE', 'ATIVIDADE', 'PDF']
+    tipos_colunas = {col: str for col in colunas_obrigatorias}
+    
+    if arquivo.name.endswith('.csv'):
+        df = pd.read_csv(arquivo, usecols=colunas_obrigatorias, dtype=tipos_colunas)
+    else:
+        import openpyxl
+        wb = openpyxl.load_workbook(arquivo, read_only=True, data_only=True)
+        ws = wb.active
+        
+        header = [str(cell.value).strip() for cell in ws[1]]
+        col_indices = {}
+        for col in colunas_obrigatorias:
+            if col in header:
+                col_indices[col] = header.index(col)
+                
+        if len(col_indices) < len(colunas_obrigatorias):
+            faltam = [c for c in colunas_obrigatorias if c not in col_indices]
+            raise ValueError(f"Faltam as seguintes colunas obrigatórias: {', '.join(faltam)}")
+
+        data = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if any(row):  # ignora linhas totalmente vazias
+                linha_filtrada = {col: str(row[idx]) if idx < len(row) and row[idx] is not None else "" for col, idx in col_indices.items()}
+                data.append(linha_filtrada)
+            
+        df = pd.DataFrame(data)
+        
+    df.columns = [col.strip() for col in df.columns]
+    return df
+
 st.sidebar.header("📁 Upload da Base de Dados")
-# Aceita explicitamente formatos mais leves como CSV se necessário
-arquivo_carregado = st.sidebar.file_uploader("Carregue o arquivo Excel unificado (.xlsx)", type=["xlsx", "xls", "csv"])
+arquivo_carregado = st.sidebar.file_uploader("Carregue o arquivo unificado (.xlsx ou .csv)", type=["xlsx", "xls", "csv"])
 
 if arquivo_carregado is not None:
     try:
-        colunas_obrigatorias = ['ANO', 'PERÍODO', 'CURSO', 'UC', 'CATÁLOGO', 'ORDEM AULA', 'ORDEM ATIVIDADE', 'ATIVIDADE', 'PDF']
-        
-        # Mapeamento de tipos para reduzir drasticamente o uso de memória RAM (Memória OOM)
-        tipos_colunas = {col: str for col in colunas_obrigatorias}
-        
-        # Otimização: Carrega APENAS as colunas estritamente necessárias
-        if arquivo_carregado.name.endswith('.csv'):
-            df = pd.read_csv(arquivo_carregado, usecols=colunas_obrigatorias, dtype=tipos_colunas)
-        else:
-            df = pd.read_excel(arquivo_carregado, engine='openpyxl', usecols=colunas_obrigatorias, dtype=tipos_colunas)
-        
-        # Remove espaços ocultos nos nomes das colunas carregadas
-        df.columns = [col.strip() for col in df.columns]
+        with st.spinner('Processando arquivo em modo otimizado de baixo consumo...'):
+            df = carregar_dados_otimizados(arquivo_carregado)
         
         st.success("✅ Base de dados otimizada carregada com sucesso!")
         
@@ -55,19 +76,19 @@ if arquivo_carregado is not None:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            anos_disponiveis = sorted(df['ANO'].dropna().unique())
+            anos_disponiveis = sorted(df['ANO'].unique())
             ano_selecionado = st.selectbox("1. Selecione o ANO:", anos_disponiveis)
         
         df_ano = df[df['ANO'] == ano_selecionado]
         
         with col2:
-            periodos_disponiveis = sorted(df_ano['PERÍODO'].dropna().unique())
+            periodos_disponiveis = sorted(df_ano['PERÍODO'].unique())
             periodo_selecionado = st.selectbox("2. Selecione o PERÍODO:", periodos_disponiveis)
             
         df_periodo = df_ano[df_ano['PERÍODO'] == periodo_selecionado]
         
         with col3:
-            cursos_disponiveis = sorted(df_periodo['CURSO'].dropna().unique())
+            cursos_disponiveis = sorted(df_periodo['CURSO'].unique())
             curso_selecionado = st.selectbox("3. Selecione o CURSO:", cursos_disponiveis)
         
         df_filtrado = df_periodo[df_periodo['CURSO'] == curso_selecionado]
@@ -92,7 +113,7 @@ if arquivo_carregado is not None:
         
         with st.form(key="form_processamento"):
             st.write("Clique abaixo para processar salvando em disco temporário.")
-            botao_disparar = st.form_submit_button("🚀 Iniciar Processamento de Baixo Consumo", type="primary")
+            botao_disparar = st.form_submit_button("🚀 Iniciar Processamento Ultra-Leve", type="primary")
         
         if botao_disparar:
             if os.path.exists(PASTA_TMP):
@@ -100,7 +121,7 @@ if arquivo_carregado is not None:
             if os.path.exists(ARQUIVO_ZIP_FINAL):
                 os.remove(ARQUIVO_ZIP_FINAL)
                 
-            df_com_pdf = df_filtrado[df_filtrado['PDF'].notna()].copy()
+            df_com_pdf = df_filtrado[df_filtrado['PDF'].astype(str).str.strip() != ""].copy()
             df_com_pdf['PDF_STR'] = df_com_pdf['PDF'].astype(str).str.strip()
             df_com_pdf = df_com_pdf[df_com_pdf['PDF_STR'].str.startswith('http')]
             
@@ -155,7 +176,7 @@ if arquivo_carregado is not None:
                             erros += 1
                             relatorio_erros.append({
                                 "UC": uc_nome,
-                                        "Atividade": atividade_nome,
+                                "Atividade": atividade_nome,
                                 "Motivo": "Timeout/Falha de Conexão",
                                 "Link": link_pdf
                             })
@@ -168,6 +189,8 @@ if arquivo_carregado is not None:
                     st.success(f"📊 {sucessos} PDFs foram estruturados com sucesso!")
                     st.session_state["zip_disponivel_no_disco"] = True
                     st.session_state["nome_do_curso_zip"] = nome_pasta_curso
+                else:
+                    st.session_state["zip_disponivel_no_disco"] = False
                     
                 if erros > 0:
                     st.warning(f"⚠️ {erros} links apresentaram falhas.")
@@ -175,20 +198,24 @@ if arquivo_carregado is not None:
                         df_erros = pd.DataFrame(relatorio_erros)
                         st.dataframe(df_erros, use_container_width=True)
         
+        # Correção crucial: Ler os bytes dinamicamente no clique sem perder o estado físico do arquivo
         if st.session_state.get("zip_disponivel_no_disco") and os.path.exists(ARQUIVO_ZIP_FINAL):
             st.markdown("### 📥 Seu arquivo está pronto:")
-            with open(ARQUIVO_ZIP_FINAL, "rb") as f:
+            
+            nome_download = f"{st.session_state.get('nome_do_curso_zip')}.zip"
+            
+            # Executa a abertura de fluxo direto (Buffer estável)
+            with open(ARQUIVO_ZIP_FINAL, "rb") as arquivo_bytes:
                 st.download_button(
-                    label=f"Baixar {st.session_state.get('nome_do_curso_zip')}.zip",
-                    data=f,
-                    file_name=f"{st.session_state.get('nome_do_curso_zip')}.zip",
+                    label=f"Baixar {nome_download}",
+                    data=arquivo_bytes.read(),  # Entrega os dados diretamente encapsulados
+                    file_name=nome_download,
                     mime="application/zip",
                     use_container_width=True
                 )
                 
     except Exception as e:
-        st.error(f"Erro crítico ao ler o arquivo: {e}")
-        st.info("Garanta que o arquivo carregado possui as colunas necessárias.")
+        st.error(f"Erro crítico: {e}")
 else:
     st.session_state["zip_disponivel_no_disco"] = False
     st.info("💡 Por favor, carregue o arquivo Excel na barra lateral.")
