@@ -15,7 +15,7 @@ st.markdown("---")
 def limpar_nome_arquivo(nome):
     if pd.isna(nome):
         return "sem_nome"
-    nome_limpo = re.sub(r'[\\/*?:"<>|]', "", str(nome))
+    nome_limpo = re.sub(r'[\\\\/*?:"<>|]', "", str(nome))
     return nome_limpo.strip()
 
 def criar_slug_curso(nome_curso):
@@ -23,7 +23,7 @@ def criar_slug_curso(nome_curso):
         return "curso_sem_nome"
     slug = str(nome_curso).lower().strip()
     slug = re.sub(r'\s+', '_', slug)
-    slug = re.sub(r'[\\/*?:"<>|]', "", slug)
+    slug = re.sub(r'[\\\\/*?:"<>|]', "", slug)
     return slug
 
 st.sidebar.header("📁 Upload da Base de Dados")
@@ -34,10 +34,8 @@ if arquivo_carregado is not None:
         if arquivo_carregado.name.endswith('.csv'):
             df = pd.read_csv(arquivo_carregado)
         else:
-            # Força o uso do openpyxl e lida com possíveis erros de formatação
             df = pd.read_excel(arquivo_carregado, engine='openpyxl')
         
-        # Opcional: Limpar nomes das colunas (remover espaços extras)
         df.columns = [col.strip() for col in df.columns]
         
         colunas_obrigatorias = ['ANO', 'PERÍODO', 'CURSO', 'UC', 'CATÁLOGO', 'ORDEM AULA', 'ORDEM ATIVIDADE', 'ATIVIDADE', 'PDF']
@@ -45,7 +43,6 @@ if arquivo_carregado is not None:
         
         if colunas_faltando:
             st.error(f"❌ Faltam as seguintes colunas no arquivo: {', '.join(colunas_faltando)}")
-            st.info(f"Colunas encontradas: {', '.join(df.columns.tolist())}")
         else:
             st.success("✅ Base de dados carregada com sucesso!")
             
@@ -89,11 +86,14 @@ if arquivo_carregado is not None:
             
             st.subheader("⚙️ Processamento e Download dos PDFs")
             
+            # CHAVE MÁGICA: Identificador único para salvar o zip na sessão do Streamlit
+            chave_estado = f"processado_{ano_selecionado}_{periodo_selecionado}_{curso_selecionado}"
+            
             if st.button("🚀 Iniciar Processamento (Sequencial)", type="primary"):
                 df_com_pdf = df_filtrado[df_filtrado['PDF'].notna() & df_filtrado['PDF'].astype(str).str.startswith('http')]
                 
                 if len(df_com_pdf) == 0:
-                    st.warning("⚠️ Nenhum PDF válido encontrado.")
+                    st.warning("⚠️ Nenhum PDF válido encontrado para os filtros selecionados.")
                 else:
                     zip_buffer = io.BytesIO()
                     progresso_bar = st.progress(0)
@@ -104,7 +104,8 @@ if arquivo_carregado is not None:
                     erros = 0
                     total = len(df_com_pdf)
                     
-                    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    # Usa mode="w" (write) que garante a criação limpa do arquivo
+                    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
                         for idx, row in df_com_pdf.reset_index().iterrows():
                             porcentagem = (idx + 1) / total
                             progresso_bar.progress(porcentagem)
@@ -139,20 +140,27 @@ if arquivo_carregado is not None:
                     st.balloons()
                     
                     if sucessos > 0:
-                        st.success(f"📊 Download concluído! {sucessos} PDFs foram baixados.")
+                        st.success(f"📊 Processamento concluído! {sucessos} PDFs foram baixados. Clique no botão abaixo para salvar o arquivo.")
+                        
+                        # SALVA O ARQUIVO NA MEMÓRIA DA SESSÃO
+                        st.session_state[chave_estado] = zip_buffer.getvalue()
+                        st.session_state[f"nome_pasta_{chave_estado}"] = nome_pasta_curso
+                        
                     if erros > 0:
                         st.warning(f"⚠️ Houve erro no download de {erros} arquivos.")
-                    
-                    zip_buffer.seek(0)
-                    st.download_button(
-                        label=f"📥 Baixar Pasta do Curso ({nome_pasta_curso}.zip)",
-                        data=zip_buffer,
-                        file_name=f"{nome_pasta_curso}.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
+            
+            # EXIBE O BOTÃO DE DOWNLOAD SE O ARQUIVO ESTIVER NA MEMÓRIA
+            if chave_estado in st.session_state:
+                st.download_button(
+                    label=f"📥 Baixar Pasta do Curso ({st.session_state[f'nome_pasta_{chave_estado}']}.zip)",
+                    data=st.session_state[chave_estado],
+                    file_name=f"{st.session_state[f'nome_pasta_{chave_estado}']}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+                
     except Exception as e:
         st.error(f"Erro ao ler o arquivo: {e}")
-        st.info("Dica: Se for um erro do Excel (ex: openpyxl ou xlrd), certifique-se de que o arquivo está em formato .xlsx ou .csv limpo.")
+        st.info("Dica: Se for um erro do Excel, certifique-se de que o arquivo está em formato .xlsx ou .csv limpo.")
 else:
     st.info("💡 Por favor, carregue o arquivo Excel na barra lateral.")
