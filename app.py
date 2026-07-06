@@ -5,32 +5,38 @@ import io
 import zipfile
 import re
 import os
+import shutil
 
 st.set_page_config(page_title="Gerenciador de Catálogos e PDFs", page_icon="📚", layout="wide")
 
 st.title("📚 Gerenciador de Download de Conteúdos (PDFs)")
 st.markdown("---")
 
-# Função para sanitizar nomes de arquivos e pastas
+# Funções de higienização de nomes
 def limpar_nome_arquivo(nome):
-    if pd.isna(nome):
+    if pd.isna(nome) or str(nome).strip() == "":
         return "sem_nome"
     nome_limpo = re.sub(r'[\\\\/*?:"<>|]', "", str(nome))
     return nome_limpo.strip()
 
 def criar_slug_curso(nome_curso):
-    if pd.isna(nome_curso):
+    if pd.isna(nome_curso) or str(nome_curso).strip() == "":
         return "curso_sem_nome"
     slug = str(nome_curso).lower().strip()
     slug = re.sub(r'\s+', '_', slug)
     slug = re.sub(r'[\\\\/*?:"<>|]', "", slug)
     return slug
 
+# Definição de caminhos temporários no DISCO (não na RAM)
+PASTA_TMP = "/tmp/download_workspace"
+ARQUIVO_ZIP_FINAL = "/tmp/resultado_curso.zip"
+
 st.sidebar.header("📁 Upload da Base de Dados")
 arquivo_carregado = st.sidebar.file_uploader("Carregue o arquivo Excel unificado (.xlsx)", type=["xlsx", "xls", "csv"])
 
 if arquivo_carregado is not None:
     try:
+        # Lendo o Excel (Sem salvar o dataframe no session_state para economizar RAM)
         if arquivo_carregado.name.endswith('.csv'):
             df = pd.read_csv(arquivo_carregado)
         else:
@@ -83,19 +89,27 @@ if arquivo_carregado is not None:
                 st.dataframe(df_filtrado[['UC', 'CATÁLOGO', 'ORDEM AULA', 'ORDEM ATIVIDADE', 'ATIVIDADE', 'PDF']])
             
             st.markdown("---")
-            
             st.subheader("⚙️ Processamento e Download dos PDFs")
             
-            # CHAVE MÁGICA: Identificador único para salvar o zip na sessão do Streamlit
-            chave_estado = f"processado_{ano_selecionado}_{periodo_selecionado}_{curso_selecionado}"
+            # Formulário para travar a tela durante a execução
+            with st.form(key="form_processamento"):
+                st.write("Clique abaixo para processar salvando em disco temporário (Evita quedas por falta de memória).")
+                botao_disparar = st.form_submit_button("🚀 Iniciar Processamento de Baixo Consumo", type="primary")
             
-            if st.button("🚀 Iniciar Processamento (Sequencial)", type="primary"):
-                df_com_pdf = df_filtrado[df_filtrado['PDF'].notna() & df_filtrado['PDF'].astype(str).str.startswith('http')]
+            if botao_disparar:
+                # Limpa lixos de execuções anteriores no disco
+                if os.path.exists(PASTA_TMP):
+                    shutil.rmtree(PASTA_TMP)
+                if os.path.exists(ARQUIVO_ZIP_FINAL):
+                    os.remove(ARQUIVO_ZIP_FINAL)
+                    
+                df_com_pdf = df_filtrado[df_filtrado['PDF'].notna()].copy()
+                df_com_pdf['PDF_STR'] = df_com_pdf['PDF'].astype(str).str.strip()
+                df_com_pdf = df_com_pdf[df_com_pdf['PDF_STR'].str.startswith('http')]
                 
                 if len(df_com_pdf) == 0:
-                    st.warning("⚠️ Nenhum PDF válido encontrado para os filtros selecionados.")
+                    st.warning("⚠️ Nenhum PDF válido encontrado.")
                 else:
-                    zip_buffer = io.BytesIO()
                     progresso_bar = st.progress(0)
                     status_text = st.empty()
                     
@@ -104,30 +118,33 @@ if arquivo_carregado is not None:
                     erros = 0
                     total = len(df_com_pdf)
                     
-                    # Usa mode="w" (write) que garante a criação limpa do arquivo
-                    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-                        for idx, row in df_com_pdf.reset_index().iterrows():
+                    # Abre o arquivo ZIP gravando direto no disco rígido temporário (/tmp)
+                    with zipfile.ZipFile(ARQUIVO_ZIP_FINAL, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+                        lista_dados = df_com_pdf.to_dict(orient="records")
+                        
+                        for idx, row in enumerate(lista_dados):
                             porcentagem = (idx + 1) / total
                             progresso_bar.progress(porcentagem)
-                            status_text.text(f"Baixando arquivo {idx+1} de {total}: {row['ATIVIDADE']}")
+                            
+                            atividade_nome = str(row.get('ATIVIDADE', 'Sem Nome'))
+                            status_text.text(f"Baixando {idx+1}/{total}: {atividade_nome}")
+                            
+                            link_pdf = row.get('PDF_STR', '')
                             
                             try:
-                                response = requests.get(row['PDF'], timeout=15)
+                                response = requests.get(link_pdf, timeout=20)
                                 if response.status_code == 200:
-                                    ordem_aula = limpar_nome_arquivo(row['ORDEM AULA'])
-                                    ordem_atividade = limpar_nome_arquivo(row['ORDEM ATIVIDADE'])
-                                    uc = limpar_nome_arquivo(row['UC'])
-                                    atividade = limpar_nome_arquivo(row['ATIVIDADE'])
+                                    ordem_aula = limpar_nome_arquivo(row.get('ORDEM AULA', '0'))
+                                    ordem_atv = limpar_nome_arquivo(row.get('ORDEM ATIVIDADE', '0'))
+                                    uc = limpar_nome_arquivo(row.get('UC', 'Sem_UC'))
+                                    atv = limpar_nome_arquivo(row.get('ATIVIDADE', 'Sem_Atividade'))
                                     
-                                    nome_pdf = f"{ordem_aula}.{ordem_atividade} - {uc} - {atividade}.pdf"
+                                    nome_pdf = f"{ordem_aula}.{ordem_atv} - {uc} - {atv}.pdf"
                                     
-                                    caminho_no_zip = os.path.join(
-                                        nome_pasta_curso, 
-                                        "04_conteudos_especificos", 
-                                        "conteudo", 
-                                        nome_pdf
-                                    )
+                                    # Caminho da árvore de pastas solicitada
+                                    caminho_no_zip = f"{nome_pasta_curso}/04_conteudos_especificos/conteudo/{nome_pdf}"
                                     
+                                    # Grava direto no disco
                                     zip_file.writestr(caminho_no_zip, response.content)
                                     sucessos += 1
                                 else:
@@ -135,32 +152,33 @@ if arquivo_carregado is not None:
                             except Exception:
                                 erros += 1
                                 continue
-                    
-                    status_text.text("✨ Processamento concluído!")
+                                
+                    status_text.text("✨ Compactação em disco concluída!")
                     st.balloons()
                     
                     if sucessos > 0:
-                        st.success(f"📊 Processamento concluído! {sucessos} PDFs foram baixados. Clique no botão abaixo para salvar o arquivo.")
-                        
-                        # SALVA O ARQUIVO NA MEMÓRIA DA SESSÃO
-                        st.session_state[chave_estado] = zip_buffer.getvalue()
-                        st.session_state[f"nome_pasta_{chave_estado}"] = nome_pasta_curso
-                        
+                        st.success(f"📊 {sucessos} PDFs foram estruturados com sucesso em cache de disco!")
+                        st.session_state["zip_disponivel_no_disco"] = True
+                        st.session_state["nome_do_curso_zip"] = nome_pasta_curso
                     if erros > 0:
-                        st.warning(f"⚠️ Houve erro no download de {erros} arquivos.")
+                        st.warning(f"⚠️ {erros} links apresentaram falhas.")
             
-            # EXIBE O BOTÃO DE DOWNLOAD SE O ARQUIVO ESTIVER NA MEMÓRIA
-            if chave_estado in st.session_state:
-                st.download_button(
-                    label=f"📥 Baixar Pasta do Curso ({st.session_state[f'nome_pasta_{chave_estado}']}.zip)",
-                    data=st.session_state[chave_estado],
-                    file_name=f"{st.session_state[f'nome_pasta_{chave_estado}']}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
+            # O botão lê o arquivo do disco apenas no milissegundo do clique do download
+            if st.session_state.get("zip_disponivel_no_disco") and os.path.exists(ARQUIVO_ZIP_FINAL):
+                st.markdown("### 📥 Seu arquivo está pronto:")
                 
+                # Abre o arquivo fisicamente e entrega os bytes sem reter na memória do app
+                with open(ARQUIVO_ZIP_FINAL, "rb") as f:
+                    st.download_button(
+                        label=f"Baixar {st.session_state.get('nome_do_curso_zip')}.zip",
+                        data=f,
+                        file_name=f"{st.session_state.get('nome_do_curso_zip')}.zip",
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+                    
     except Exception as e:
-        st.error(f"Erro ao ler o arquivo: {e}")
-        st.info("Dica: Se for um erro do Excel, certifique-se de que o arquivo está em formato .xlsx ou .csv limpo.")
+        st.error(f"Erro crítico: {e}")
 else:
+    st.session_state["zip_disponivel_no_disco"] = False
     st.info("💡 Por favor, carregue o arquivo Excel na barra lateral.")
